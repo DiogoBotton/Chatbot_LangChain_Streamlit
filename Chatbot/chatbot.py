@@ -1,4 +1,6 @@
 import streamlit as st
+
+# Importação de bibliotecas para a criação da LLM
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import MessagesPlaceholder
 
@@ -7,6 +9,18 @@ from langchain_openai import ChatOpenAI
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+
+# Importação de bibliotecas para realizar o RAG
+import faiss # Banco de dados vetorial
+import tempfile
+import os
+import time
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+#from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+#from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.document_loaders import PyPDFLoader
 
 from dotenv import load_dotenv
 
