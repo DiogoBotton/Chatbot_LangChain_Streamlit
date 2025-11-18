@@ -4,14 +4,14 @@ import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import MessagesPlaceholder
 
-from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 # Importação de bibliotecas para realizar o RAG
-import faiss # Banco de dados vetorial
+import faiss # Banco de dados vetorial, busca de similaridade e agrupamento de vetores
 import tempfile
 import os
 import time
@@ -82,6 +82,52 @@ def model_response(user_query, chat_history, model_class):
     return chain.stream({"chat_history": chat_history,
                          "input": user_query,
                          "language": language})
+
+def config_retriever(uploads):
+    # Carregar documentos
+    docs = []
+    temp_dir = tempfile.TemporaryDirectory()
+    for file in uploads:
+        temp_filepath = os.path.join(temp_dir.name, file.name)
+        with open(temp_filepath, "wb") as f:
+            f.write(file.getvalue())
+        
+        loader = PyPDFLoader(temp_filepath)
+        docs.extend(loader.load())
+    
+    # Divisão em pedaços de texto / split
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size = 1000, # Dividirá o texto em pedaços de 1000 caracteres
+                                               chunk_overlap = 200,
+                                               add_start_index = True) # Para o índice dos caracteres inicial seja preservado
+    splits = text_splitter.split_documents(docs)
+    
+    # Embeddings
+    ollama_embedding = OllamaEmbeddings(
+        model="bge-m3:567m"
+    )
+    
+    # Armazenamento
+    vectorstore = FAISS.from_documents(splits, ollama_embedding)
+    vectorstore.save_local("vectorstore/db_faiss")
+    
+    # Configuração do retriever
+    
+    # MMR - Seleciona os documentos baseado na relevância e diversidade entre os documentos recuperados, para evitar retornar contextos duplicados
+    # Garante um melhor equilíbrio entre a relevância e a diversidade dos itens recuperados.
+    
+    # K -> Total de documentos recuperados
+    # fetch_k -> Quantos documentos são recuperados antes de aplicar o algoritmo de MMR (valor padrão: 20)
+    
+    # Primeiro é adquirido os documentos (4), após isso, é aplicado o algoritmo de MMR para retornar os docs mais relevantes (3)
+    retriever = vectorstore.as_retriever(search_type = "mmr", # Maximum Marginal Relevance Retriever
+                                         search_kwargs={"k": 3, "fetch_k": 4})
+    
+    return retriever
+    
+uploads = st.sidebar.file_uploader(
+    label="Enviar arquivos", type=["pdf"],
+    accept_multiple_files=True
+)
 
 # Cria variável chat_history caso não exista
 if "chat_history" not in st.session_state:
