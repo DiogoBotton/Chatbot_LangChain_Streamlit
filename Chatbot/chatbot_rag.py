@@ -11,11 +11,12 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
 # Importação de bibliotecas para realizar o RAG
-import faiss # Banco de dados vetorial, busca de similaridade e agrupamento de vetores
+#import faiss # Banco de dados vetorial, busca de similaridade e agrupamento de vetores
+#from langchain_community.vectorstores import FAISS
+from langchain_chroma import Chroma
 import tempfile
 import os
 import time
-from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
@@ -51,39 +52,6 @@ def model_ollama(model = "llama3.1:8b", temperature = 0.1):
     llm = ChatOllama(model=model, temperature=temperature)
     return llm
 
-def model_response(user_query, chat_history, model_class):
-    """
-    Modelo com histórico, sem RAG.
-    """
-    # Carregamento da LLM
-    match model_class:
-        case ClassType.OPENAI:
-            llm = model_openai()
-        case ClassType.OLLAMA:
-            llm = model_ollama()
-        case _: # default
-            raise Exception("Tipo de modelo não é válido.")
-        
-    # Definição dos prompts
-    system_prompt = "Você é um assistente prestativo e está respondendo perguntas gerais. Responda em {language}."
-    language = "português"
-    
-    # Definição do prompt template de Chat
-    # O MessagesPlaceHolder é usado para armazenar o histórico das conversas
-    prompt_template = ChatPromptTemplate([
-        ("system", system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("user", "{input}")
-    ])
-    
-    # Criação da Chain
-    chain = prompt_template | llm | StrOutputParser()
-    
-    # stream retornará as respostas dinamicamente enquanto são geradas, invoke retornará tudo de uma vez
-    return chain.stream({"chat_history": chat_history,
-                         "input": user_query,
-                         "language": language})
-
 def config_retriever(uploads):
     # Carregar documentos
     docs = []
@@ -104,12 +72,12 @@ def config_retriever(uploads):
     
     # Embeddings
     ollama_embedding = OllamaEmbeddings(
-        model="bge-m3:567m"
+        model="bge-m3:latest"
     )
     
     # Armazenamento
-    vectorstore = FAISS.from_documents(splits, ollama_embedding)
-    vectorstore.save_local("vectorstore/db_faiss")
+    vectorstore = Chroma.from_documents(splits, ollama_embedding)
+    # vectorstore.save_local("vectorstore/db_chroma")
     
     # Configuração do retriever
     
@@ -176,52 +144,25 @@ def config_rag_chain(model_class, retriever):
     qa_chain = qa_prompt | llm | StrOutputParser()
     
     # 7. RAG final combinado
-    rag_chain = retrieval_chain | qa_chain
+    # rag_chain = retrieval_chain | qa_chain # Sem fontes
+    
+    # Chain RAG que retorna com as fontes (contexto)
+    rag_chain = (retrieval_chain
+                 | RunnableParallel({
+                     "answer": qa_chain,
+                     "context": lambda x: x["context"]
+                 }))
     
     return rag_chain
-
-def config_route_chain(model_class):
-    """
-    Fará a decisão se o modelo deve enviar para o modelo com RAG ou simplesmente para o modelo de conversação.    
-    """
-    match model_class:
-        case ClassType.OPENAI:
-            llm = model_openai()
-        case ClassType.OLLAMA:
-            llm = model_ollama()
-        case _: # default
-            raise Exception("Tipo de modelo não é válido.")
-        
-    route_prompt = ChatPromptTemplate.from_messages([
-        ("system", 
-            "Determine if the user message is asking about the documents or is casual conversation.\n"
-            "Respond STRICTLY with one word: 'retrieval' or 'conversation'."),
-        ("human", "{input}")
-    ])
-    
-    route_chain = route_prompt | llm | StrOutputParser()
-    
-    return route_chain
-
-def final_chain(input):
-    """
-    Envia o input do usuário para algum dos modelos dependendo da pergunta (modelos com RAG ou sem)
-    """
-    route_chain_llm = config_route_chain(model_class_type)
-    route = route_chain_llm.invoke({"input": input})
-    
-    if "retrieval" in route.lower():
-        pass # TODO: Definir resp aqui também
-    else:
-        resp = st.write_stream(model_response(user_query,
-                                              st.session_state.chat_history,
-                                              model_class_type))
-    st.session_state.chat_history.append(AIMessage(content=resp))
 
 uploads = st.sidebar.file_uploader(
     label="Enviar arquivos", type=["pdf"],
     accept_multiple_files=True
 )
+
+if not uploads:
+    st.info("Por favor, envie algum arquivo para continuar!")
+    st.stop()
 
 # Define variáveis de sessão
 # Cria variáveisvel chat_history, docs_list e retriever caso não existam
@@ -247,11 +188,30 @@ for message in st.session_state.chat_history:
 user_query = st.chat_input("Digite sua mensagem aqui...")
 
 # Adiciona o input ao chat
-if user_query is not None and len(user_query) != 0:
+if user_query is not None and len(user_query) != 0 and uploads is not None:
     st.session_state.chat_history.append(HumanMessage(content=user_query))
     
     with st.chat_message("human"):
         st.markdown(user_query)
     
     with st.chat_message("ai"):
-        final_chain(user_query)
+        if st.session_state.docs_list != uploads:
+            st.session_state.docs_list = uploads
+            st.session_state.retriever = config_retriever(uploads)
+            
+        rag_chain = config_rag_chain(model_class_type, st.session_state.retriever)
+        result = rag_chain.invoke({"input": input, "chat_history": st.session_state.chat_history})
+        resp = result['answer']
+        st.write(resp)
+        
+        # Mostrar a fonte
+        sources = result['context']
+        for idx, doc in enumerate(sources):
+           source = doc.metadata['source']
+           file = os.path.basename(source)
+           page = doc.metadata.get('page', 'Página não especificada')
+           ref = f":link: Fonte {idx}: *{file} - p. {page}*"
+           with st.popover(ref):
+               st.caption(doc.page_content)
+               
+    st.session_state.chat_history.append(AIMessage(content=resp))
